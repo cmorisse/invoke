@@ -842,6 +842,18 @@ class Config(DataProxy):
         # Data loaded from the per-project config file.
         self._set(_project={})
 
+    def _get_file_loader(self, filepath):
+        try:
+            type_ = splitext(filepath)[1].lstrip(".")
+            loader = getattr(self, "_load_{}".format(type_))
+        except AttributeError:
+            msg = "Config files of type {!r} (from file {!r}) are not supported! Please use one of: {!r}"  # noqa
+            raise UnknownFileType(
+                msg.format(type_, filepath, self._file_suffixes)
+            )
+        return loader
+
+
     def _load_file(self, prefix, absolute=False, merge=True):
         # Setup
         found = "_{}_found".format(prefix)
@@ -875,16 +887,9 @@ class Config(DataProxy):
             # Normalize
             filepath = expanduser(filepath)
             try:
-                try:
-                    type_ = splitext(filepath)[1].lstrip(".")
-                    loader = getattr(self, "_load_{}".format(type_))
-                except AttributeError:
-                    msg = "Config files of type {!r} (from file {!r}) are not supported! Please use one of: {!r}"  # noqa
-                    raise UnknownFileType(
-                        msg.format(type_, filepath, self._file_suffixes)
-                    )
                 # Store data, the path it was found at, and fact that it was
                 # found
+                loader =  self._get_file_loader(filepath)
                 self._set(data, loader(filepath))
                 self._set(path, filepath)
                 self._set(found, True)
@@ -903,16 +908,27 @@ class Config(DataProxy):
         elif merge:
             self.merge()
 
+    def _process_extends_chain(self, data):
+        if '__$extends' in data:
+            base_file_path = data['__$extends']
+            del data['__$extends']
+            base_file_loader =  self._get_file_loader(base_file_path)
+            base_data = base_file_loader(base_file_path)
+            data = merge_dicts(base_data, data)
+        return data
+
     def _load_yaml(self, path):
         with open(path) as fd:
-            return yaml.load(fd)
+            data = self._process_extends_chain(yaml.load(fd))
+        return data
 
     def _load_yml(self, path):
         return self._load_yaml(path)
 
     def _load_json(self, path):
         with open(path) as fd:
-            return json.load(fd)
+            data = self._process_extends_chain(json.load(fd))
+        return data
 
     def _load_py(self, path):
         data = {}
@@ -1191,19 +1207,31 @@ def merge_dicts(base, updates):
     for key, value in (updates or {}).items():
         # Dict values whose keys also exist in 'base' -> recurse
         # (But only if both types are dicts.)
+        if '__$' in key:
+            key, cmd = key.split('__$')
+        else:
+            cmd = None
+
         if key in base:
             if isinstance(value, dict):
                 if isinstance(base[key], dict):
                     merge_dicts(base[key], value)
                 else:
                     raise _merge_error(base[key], value)
+            elif isinstance(value, list):
+                if isinstance(base[key], list):
+                        merge_lists(base, key, value, command=cmd)
+                else:
+                    raise _merge_error(base[key], value)
             else:
-                if isinstance(base[key], dict):
+                if isinstance(base[key], (dict, list,)):
                     raise _merge_error(base[key], value)
                 # Fileno-bearing objects are probably 'real' files which do not
                 # copy well & must be passed by reference. Meh.
                 elif hasattr(value, "fileno"):
                     base[key] = value
+                elif isinstance(base, dict) and isinstance(value, str) and value=="__$delete":
+                    del base[key]
                 else:
                     base[key] = copy.copy(value)
         # New values get set anew
@@ -1220,6 +1248,59 @@ def merge_dicts(base, updates):
             else:
                 base[key] = copy.copy(value)
     return base
+
+
+def merge_lists(base, key, updates, command=None):
+    """
+    Recursively merge list ``updates`` into list ``base`` (mutating ``base``.)
+
+    * Values which are themselves dicts will be recursed into.
+    * Values which are a list in one input and *not* a list in the other input
+      (e.g. if our inputs were ``['foo', 5]`` and ``{'foo': {'bar': 5}}``) are
+      irreconciliable and will generate an exception.
+    * Non-dict and non-list leaf values are run through `copy.copy` to avoid 
+      state bleed.
+    * We accept ``base`` and ``key`` parameters to retreive a reference to the 
+      base list since we need to mutate it.
+
+    .. note::
+        This is effectively a lightweight `copy.deepcopy` which offers
+        protection from mismatched types (dict vs non-dict) and avoids some
+        core deepcopy problems (such as how it explodes on certain object
+        types).
+        Only dicts elem are recursively merged.
+    :returns:
+        The value of ``base[key]``, which is mostly useful for wrapper functions
+        like `copy_dict`.
+
+    .. versionadded:: 1.0
+    """
+    if command is None:
+        command = 'let'
+    
+    if command == 'let':
+        base[key] = copy.copy(updates)
+        return base[key]
+
+    for update_elem in updates:
+        if command=='merge':
+            # Do we have an updatable dict; a dict with a 'name' kay
+            if isinstance(update_elem, dict) and update_elem.get('name'):
+                inner_key = update_elem['name']
+                for base_elem in base[key]:
+                    if isinstance(base_elem, dict) and base_elem.get('name')==inner_key:
+                        merge_dicts(base_elem, update_elem)
+            elif update_elem not in base[key]:
+                base[key].append(update_elem)
+
+        elif command=='delete':
+            if update_elem in base[key]:
+                base[key].remove(update_elem)
+
+        elif command:
+            raise Exception("Command: '%s' is not Implemented!!" % command)
+
+    return base[key]
 
 
 def _merge_error(orig, new_):
