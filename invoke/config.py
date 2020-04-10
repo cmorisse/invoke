@@ -933,7 +933,7 @@ class Config(DataProxy):
 
     def _load_jsonc(self, path):
         with open(path) as fd:
-            return JsonComment().load(fd)
+            return self._process_extends_chain(JsonComment().load(fd))
 
     def _load_py(self, path):
         data = {}
