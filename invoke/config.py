@@ -1,5 +1,6 @@
 import copy
 import json
+from jsoncomment import JsonComment
 import os
 import types
 from os.path import join, splitext, expanduser
@@ -575,7 +576,7 @@ class Config(DataProxy):
         self._set(_config={})
 
         # Config file suffixes to search, in preference order.
-        self._set(_file_suffixes=("yaml", "yml", "json", "py"))
+        self._set(_file_suffixes=("yaml", "yml", "json", "jsonc", "py"))
 
         # Default configuration values, typically a copy of `global_defaults`.
         if defaults is None:
@@ -913,6 +914,10 @@ class Config(DataProxy):
     def _load_json(self, path):
         with open(path) as fd:
             return json.load(fd)
+
+    def _load_jsonc(self, path):
+        with open(path) as fd:
+            return JsonComment().load(fd)
 
     def _load_py(self, path):
         data = {}
